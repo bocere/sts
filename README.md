@@ -30,7 +30,7 @@ samples, not recordings or clones of the Justices.**
 - Linux or macOS
 - Python 3.10+
 - `ffmpeg` on your `PATH` (`sudo apt install ffmpeg`)
-- [Git LFS](https://git-lfs.github.com) (`sudo apt install -y git-lfs`)
+- [Git LFS](https://git-lfs.github.com) (`sudo apt install git-lfs`)
 
 ## Setup
 

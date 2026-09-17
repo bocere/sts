@@ -5,6 +5,7 @@ Monitors the Supreme Court website for new opinions, downloads them,
 converts them to text, and generates audio files.
 """
 
+import argparse
 import json
 import logging
 import re
@@ -233,8 +234,78 @@ def text_to_speech(text: str, output_path: Path) -> None:
     voices.synthesize_opinion(text, output_path)
 
 
+def _unique_path(directory: Path, stem: str, suffix: str) -> Path:
+    """First `directory/{stem}{suffix}` not already on disk, else
+    `directory/{stem} [2]{suffix}`, `[3]`, etc."""
+    path = directory / f"{stem}{suffix}"
+    n = 2
+    while path.exists():
+        path = directory / f"{stem} [{n}]{suffix}"
+        n += 1
+    return path
+
+
+# ── Single local file ──────────────────────────────────────────────────────────
+def convert_file(pdf_path: Path) -> None:
+    """Convert one already-downloaded opinion PDF to audio, bypassing the
+    SCOTUS-site check and `downloaded.json` bookkeeping entirely."""
+    if not pdf_path.is_file():
+        log.error(f"File not found: {pdf_path}")
+        sys.exit(1)
+
+    case_name = sanitize_filename(pdf_path.stem)
+    log.info(f"Converting {pdf_path} (case: {case_name})")
+
+    try:
+        raw_text = pdf_to_text(pdf_path.read_bytes())
+    except Exception as exc:
+        log.error(f"PDF extraction failed for {case_name}: {exc}")
+        sys.exit(1)
+
+    final_text = fix_paragraphs(remove_headers_footers(raw_text))
+    if not final_text.strip():
+        log.error(f"No usable text extracted from {pdf_path}")
+        sys.exit(1)
+
+    TEXT_DIR.mkdir(exist_ok=True)
+    text_path = _unique_path(TEXT_DIR, case_name, ".txt")
+    text_path.write_text(final_text, encoding="utf-8")
+
+    WAV_DIR.mkdir(exist_ok=True)
+    wav_path = _unique_path(WAV_DIR, case_name, ".wav")
+    log.info(f"Generating audio: {wav_path.name}")
+    try:
+        text_to_speech(final_text, wav_path)
+    except Exception as exc:
+        log.error(f"TTS failed for {case_name}: {exc}")
+        sys.exit(1)
+
+    log.info(f"Done: {case_name}")
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="sts - SCOTUS to Speech")
+    parser.add_argument(
+        "--file",
+        type=Path,
+        metavar="PDF",
+        help=(
+            "Convert a single already-downloaded opinion PDF to audio and "
+            "exit, instead of checking the SCOTUS site for new opinions. "
+            "Does not read or update downloaded.json."
+        ),
+    )
+    return parser.parse_args()
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main() -> None:
+    args = parse_args()
+    if args.file:
+        convert_file(args.file)
+        return
+
     seen = load_state()
 
     listing_url = current_term_url()

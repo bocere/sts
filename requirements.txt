@@ -1,6 +1,19 @@
-# Direct dependencies of sts and voices.py, pinned to versions known to
-# work together. Transitive dependencies (torch, gradio, faster-whisper,
-# whisper-timestamped, misaki, etc.) are resolved automatically by pip.
+# Direct dependencies of sts and voices.py, pinned to versions verified to
+# work together, PLUS every runtime dependency OpenVoice actually imports
+# (faster-whisper, whisper-timestamped, wavmark for its speaker-embedding/
+# tone-conversion code; inflect, unidecode, eng_to_ipa, pypinyin, jieba,
+# cn2an for its text-cleaning module, imported unconditionally even though
+# we only ever feed it English text).
+#
+# OpenVoice's own package metadata pins exact (and now stale) versions of
+# most of these — e.g. numpy==1.22.0, librosa==0.9.1 — that conflict with
+# what's listed here and with what modern torch needs. It's installed with
+# --no-deps (see README) so pip never tries to satisfy those pins; pip will
+# print "incompatible" warnings about them afterwards, which is expected
+# and harmless — nothing OpenVoice code we actually call requires the
+# specific old versions it asks for. gradio and langid, OpenVoice's other
+# declared dependencies, are only used by its demo web app and are never
+# imported by ToneColorConverter or se_extractor, so they're skipped.
 requests==2.34.2
 beautifulsoup4==4.15.0
 lxml==6.1.1
@@ -11,4 +24,12 @@ librosa==0.11.0
 soundfile==0.14.0
 numpy==2.4.6
 kokoro==0.9.4
-MyShell-OpenVoice @ git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23
+faster-whisper==1.2.1
+whisper-timestamped==1.15.9
+wavmark==0.0.3
+inflect==7.5.0
+Unidecode==1.4.0
+eng_to_ipa==0.0.2
+pypinyin==0.55.0
+jieba==0.42.1
+cn2an==0.5.24

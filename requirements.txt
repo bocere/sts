@@ -1,0 +1,14 @@
+# Direct dependencies of sts and voices.py, pinned to versions known to
+# work together. Transitive dependencies (torch, gradio, faster-whisper,
+# whisper-timestamped, misaki, etc.) are resolved automatically by pip.
+requests==2.34.2
+beautifulsoup4==4.15.0
+lxml==6.1.1
+pdfminer.six==20260107
+torch==2.12.1
+pydub==0.25.1
+librosa==0.11.0
+soundfile==0.14.0
+numpy==2.4.6
+kokoro==0.9.4
+MyShell-OpenVoice @ git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23

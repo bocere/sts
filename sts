@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""
+sts - SCOTUS to Speech
+Monitors the Supreme Court website for new opinions, downloads them,
+converts them to text, and generates audio files.
+"""
+
+import json
+import logging
+import re
+import sys
+from datetime import date, timedelta
+from io import BytesIO, StringIO
+from pathlib import Path
+
+import requests
+from bs4 import BeautifulSoup
+from pdfminer.high_level import extract_text_to_fp
+from pdfminer.layout import LAParams
+
+import voices
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+SCRIPT_DIR = Path(__file__).parent
+STATE_FILE = SCRIPT_DIR / "downloaded.json"
+LOG_FILE = SCRIPT_DIR / "action.log"
+VENV_PYTHON = SCRIPT_DIR / "venv/bin/python"
+TEXT_DIR = SCRIPT_DIR / "text"
+WAV_DIR = SCRIPT_DIR / "wav"
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.getLogger("sts")
+
+
+# ── State (already-processed opinions) ────────────────────────────────────────
+def load_state() -> set:
+    if STATE_FILE.exists():
+        with open(STATE_FILE) as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_state(seen: set) -> None:
+    with open(STATE_FILE, "w") as f:
+        json.dump(sorted(seen), f, indent=2)
+
+
+# ── SCOTUS term URL ────────────────────────────────────────────────────────────
+def current_term_url() -> str:
+    """Return the opinions listing URL for the current SCOTUS term."""
+    today = date.today()
+    # Find first Monday in October of the current calendar year
+    oct1 = date(today.year, 10, 1)
+    days_until_monday = (7 - oct1.weekday()) % 7
+    term_start_this_year = oct1 + timedelta(days=days_until_monday)
+
+    if today >= term_start_this_year:
+        term_year = today.year
+    else:
+        term_year = today.year - 1
+
+    return f"https://www.supremecourt.gov/opinions/slipopinion/{term_year % 100:02d}"
+
+
+# ── Scrape opinions listing ────────────────────────────────────────────────────
+def fetch_opinions(url: str) -> list[dict]:
+    """Return list of {name, pdf_url} for all opinions on the page."""
+    resp = requests.get(url, timeout=30, headers={"User-Agent": "sts/1.0"})
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "lxml")
+
+    opinions = []
+    for link in soup.find_all("a", href=True):
+        href = link["href"]
+        if not href.lower().endswith(".pdf"):
+            continue
+        # Only actual opinion PDFs — they live under /opinions/NNpdf/
+        if not re.search(r"/opinions/\d+pdf/", href, re.IGNORECASE):
+            continue
+        # Build absolute URL
+        if href.startswith("http"):
+            pdf_url = href
+        elif href.startswith("/"):
+            pdf_url = "https://www.supremecourt.gov" + href
+        else:
+            continue
+
+        # Case name: try the enclosing <td> or the link text itself
+        case_name = _extract_case_name(link)
+        if case_name:
+            opinions.append({"name": case_name, "pdf_url": pdf_url})
+
+    return opinions
+
+
+def _extract_case_name(link_tag) -> str:
+    """
+    Walk up the DOM from a PDF <a> tag to find the case name.
+    The SCOTUS opinion table has the case name in the cell containing " v. ".
+    """
+    row = link_tag.find_parent("tr")
+    if row:
+        cells = row.find_all("td")
+        # First pass: look for a cell that looks like a case name (has " v. ")
+        for cell in cells:
+            text = cell.get_text(separator=" ", strip=True)
+            if " v. " in text or " v " in text:
+                return sanitize_filename(text)
+        # Second pass: take the longest cell that isn't a number or date
+        best = ""
+        for cell in cells:
+            text = cell.get_text(separator=" ", strip=True)
+            if re.match(r"^[\d/]+$", text):
+                continue
+            if len(text) > len(best):
+                best = text
+        if best:
+            return sanitize_filename(best)
+
+    # Fallback: derive name from PDF filename
+    pdf_name = link_tag["href"].rstrip("/").split("/")[-1]
+    return sanitize_filename(pdf_name.replace(".pdf", ""))
+
+
+def sanitize_filename(name: str) -> str:
+    """Remove characters illegal in filenames."""
+    name = re.sub(r'[<>:"/\\|?*]', "", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:200]  # cap length
+
+
+# ── PDF → text ─────────────────────────────────────────────────────────────────
+def pdf_to_text(pdf_bytes: bytes) -> str:
+    """Extract text from PDF bytes using pdfminer."""
+    buf = StringIO()
+    extract_text_to_fp(
+        BytesIO(pdf_bytes),
+        buf,
+        laparams=LAParams(),
+        output_type="text",
+        codec="utf-8",
+    )
+    return buf.getvalue()
+
+
+# ── Header/footer removal ──────────────────────────────────────────────────────
+# SCOTUS slip opinions have consistent header/footer patterns:
+#   - "Cite as: NNN U.S. ___ (YYYY)"
+#   - "SUPREME COURT OF THE UNITED STATES"
+#   - Standalone page numbers
+#   - "Opinion of the Court", "THOMAS, J., concurring", etc. (section labels)
+_HEADER_FOOTER_RE = re.compile(
+    r"(?m)^[ \t]*("
+    r"Cite as:.*?$"
+    r"|SUPREME COURT OF THE UNITED STATES.*?$"
+    r"|\d+\s*$"                          # bare page number
+    r"|[A-Z ,]+,\s+[CJA-Z\.]+,\s+(concurring|dissenting|concur|dissent).*?$"
+    r")[ \t]*\n?"
+)
+
+
+def remove_headers_footers(text: str) -> str:
+    cleaned = _HEADER_FOOTER_RE.sub("", text)
+    # Collapse runs of 3+ blank lines down to 2
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+# ── Paragraph reconstruction ───────────────────────────────────────────────────
+def fix_paragraphs(text: str) -> str:
+    """
+    Join soft-wrapped lines within a paragraph.
+    A line break is a paragraph break only when followed by a blank line
+    or when the next line starts with significant indentation (new para).
+    """
+    lines = text.splitlines()
+    output = []
+    buffer = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped == "":
+            # Blank line = paragraph boundary
+            if buffer:
+                output.append(" ".join(buffer))
+                buffer = []
+            output.append("")
+        else:
+            buffer.append(stripped)
+
+    if buffer:
+        output.append(" ".join(buffer))
+
+    # A word hyphenated right at a page break survives as two paragraphs
+    # ("...appears to exceed Con-", "gress's enumerated..."), usually with
+    # a spurious blank-line placeholder in between from the page boundary.
+    # Rejoin those instead of leaving an audible false break.
+    merged = []
+    i = 0
+    while i < len(output):
+        para = output[i]
+        if para and para[-1] == "-" and para[-2:-1].isalpha():
+            j = i + 1
+            while j < len(output) and output[j] == "":
+                j += 1
+            if j < len(output) and output[j] and output[j][0].islower():
+                merged.append(para[:-1] + output[j])
+                i = j + 1
+                continue
+        merged.append(para)
+        i += 1
+    output = merged
+
+    # Remove leading/trailing blank lines and collapse multiple blanks
+    result = "\n".join(output)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
+
+
+# ── Text → speech ──────────────────────────────────────────────────────────────
+def text_to_speech(text: str, output_path: Path) -> None:
+    """Segment `text` by authoring Justice and synthesize each in that
+    Justice's accent-matched voice (see voices.py)."""
+    voices.synthesize_opinion(text, output_path)
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+def main() -> None:
+    seen = load_state()
+
+    listing_url = current_term_url()
+    log.info(f"Checking {listing_url}")
+
+    try:
+        opinions = fetch_opinions(listing_url)
+    except Exception as exc:
+        log.error(f"Failed to fetch opinions listing: {exc}")
+        sys.exit(1)
+
+    log.info(f"Found {len(opinions)} opinion(s) on page")
+
+    new_count = 0
+    for op in opinions:
+        pdf_url = op["pdf_url"]
+        case_name = op["name"]
+
+        if pdf_url in seen:
+            continue
+
+        log.info(f"New opinion: {case_name} ({pdf_url})")
+
+        # 1. Download PDF
+        try:
+            pdf_resp = requests.get(
+                pdf_url, timeout=60, headers={"User-Agent": "sts/1.0"}
+            )
+            pdf_resp.raise_for_status()
+            pdf_bytes = pdf_resp.content
+        except Exception as exc:
+            log.error(f"Failed to download {pdf_url}: {exc}")
+            continue
+
+        # 2. Convert PDF → text
+        try:
+            raw_text = pdf_to_text(pdf_bytes)
+        except Exception as exc:
+            log.error(f"PDF extraction failed for {case_name}: {exc}")
+            continue
+
+        # 3. Remove headers/footers
+        clean_text = remove_headers_footers(raw_text)
+
+        # 4. Fix paragraph wrapping
+        final_text = fix_paragraphs(clean_text)
+
+        if not final_text.strip():
+            log.warning(f"No usable text extracted from {case_name}, skipping")
+            continue
+
+        # Save extracted text alongside the audio
+        TEXT_DIR.mkdir(exist_ok=True)
+        text_path = TEXT_DIR / f"{case_name}.txt"
+        if text_path.exists():
+            pdf_suffix = op["pdf_url"].rstrip("/").split("/")[-1].replace(".pdf", "")
+            text_path = TEXT_DIR / f"{case_name} [{pdf_suffix}].txt"
+        text_path.write_text(final_text, encoding="utf-8")
+
+        # 5. Convert text → speech — avoid overwriting if name collides
+        WAV_DIR.mkdir(exist_ok=True)
+        wav_path = WAV_DIR / f"{case_name}.wav"
+        if wav_path.exists():
+            pdf_suffix = op["pdf_url"].rstrip("/").split("/")[-1].replace(".pdf", "")
+            wav_path = WAV_DIR / f"{case_name} [{pdf_suffix}].wav"
+        try:
+            log.info(f"Generating audio: {wav_path.name}")
+            text_to_speech(final_text, wav_path)
+        except Exception as exc:
+            log.error(f"TTS failed for {case_name}: {exc}")
+            continue
+
+        # Mark as processed
+        seen.add(pdf_url)
+        save_state(seen)
+        new_count += 1
+        log.info(f"Done: {case_name}")
+
+    if new_count == 0:
+        log.info("No new opinions.")
+    else:
+        log.info(f"Processed {new_count} new opinion(s).")
+
+
+if __name__ == "__main__":
+    main()

@@ -45,6 +45,7 @@ cd sts
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+pip install --no-deps "MyShell-OpenVoice @ git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23"
 ```
 
 ## Running it

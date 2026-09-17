@@ -7,7 +7,6 @@ action.log
 downloaded.json
 text/
 wav/
-config.json
 
 # Speaker-embedding caches — regenerated automatically on first use
 voices/_base_se/

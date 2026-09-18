@@ -1,9 +1,13 @@
 # SCOTUS to Speech
 
-Monitors the Supreme Court's opinions page for newly released opinions,
-downloads each PDF, converts it to clean text, and synthesizes it as audio —
-with each opinion segmented by authoring Justice and read in a distinct,
-accent-matched voice. Designed to run unattended on a cron schedule.
+Do you love listening to oral arguments at the Supreme Court?
+Are you sad there's no recordings of each Justice reading their own writing?
+Me too!
+
+If we can't clone their voices, we can at least *approximate* their voices.
+
+This program monitors the Supreme Court's opinions page for newly released opinions,
+downloads each PDF, and converts each opinion segment to a Justice-approximate voice.
 
 ## How it works
 

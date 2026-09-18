@@ -52,7 +52,7 @@ pip install -r requirements.txt
 pip install --no-deps "MyShell-OpenVoice @ git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23"
 ```
 
-## Running it
+## Convert SCOTUS to Speech
 
 ```bash
 source venv/bin/activate
@@ -79,7 +79,7 @@ Runs weekday mornings; the SCOTUS opinions page updates on an irregular
 schedule during the term, so a scheduled check simply finds nothing new
 most days.
 
-### Converting a single local PDF
+## Convert a Single Opinion
 
 Use the `--file` option to convert one opinion PDF you already have on disk
 without checking the SCOTUS site or touching `downloaded.json`.
